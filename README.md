@@ -99,7 +99,7 @@ npm link n8n-nodes-video-metadata
 
 ## 📄 License
 
-MIT
+This project <img alt="Brasil" src="https://github.com/JohnSalazar/microservices-go-authentication/assets/16736914/3ecb04fb-b2ce-4e8b-b492-99c5c5c4b317" width="20" height="14" /> is licensed under the [MIT License](LICENSE).
 
 ## 🤝 Contributing
 
