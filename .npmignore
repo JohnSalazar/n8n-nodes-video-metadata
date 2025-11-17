@@ -1,7 +1,17 @@
+node_modules/
 nodes/
 credentials/
 tsconfig.json
+gulpfile.js
 .gitignore
 .git/
 *.ts
 !dist/**/*.d.ts
+src/
+test/
+tests/
+*.test.js
+*.spec.js
+.vscode/
+.idea/
+.DS_Store

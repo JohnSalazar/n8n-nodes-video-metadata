@@ -7,12 +7,14 @@ import {
 } from "n8n-workflow";
 
 import { exec } from "child_process";
+import { createWriteStream } from "fs";
 import { unlink, writeFile } from "fs/promises";
+import * as http from "http";
+import * as https from "https";
 import { tmpdir } from "os";
 import { join } from "path";
 import { promisify } from "util";
 
-// Importar os binários estáticos
 const ffprobeStatic = require("ffprobe-static");
 
 const execPromise = promisify(exec);
@@ -24,7 +26,7 @@ export class VideoMetadata implements INodeType {
     icon: "file:video-metadata.svg",
     group: ["transform"],
     version: 1,
-    subtitle: '={{$parameter["operation"]}}',
+    subtitle: '={{$parameter["operation"] + " - " + $parameter["inputMode"]}}',
     description: "Extract metadata from video files using FFprobe",
     defaults: {
       name: "Video Metadata",
@@ -32,6 +34,53 @@ export class VideoMetadata implements INodeType {
     inputs: ["main"],
     outputs: ["main"],
     properties: [
+      {
+        displayName: "Input Mode",
+        name: "inputMode",
+        type: "options",
+        noDataExpression: true,
+        options: [
+          {
+            name: "Binary Data",
+            value: "binaryData",
+            description: "Use video from binary data (from previous node)",
+          },
+          {
+            name: "Download from URL",
+            value: "url",
+            description: "Download video from URL",
+          },
+        ],
+        default: "binaryData",
+        description: "How to get the video file",
+      },
+      {
+        displayName: "Video URL",
+        name: "videoUrl",
+        type: "string",
+        default: "",
+        required: true,
+        displayOptions: {
+          show: {
+            inputMode: ["url"],
+          },
+        },
+        placeholder: "https://example.com/video.mp4",
+        description: "URL of the video file to analyze",
+      },
+      {
+        displayName: "Binary Property",
+        name: "binaryPropertyName",
+        type: "string",
+        default: "data",
+        required: true,
+        displayOptions: {
+          show: {
+            inputMode: ["binaryData"],
+          },
+        },
+        description: "Name of the binary property containing the video file",
+      },
       {
         displayName: "Operation",
         name: "operation",
@@ -60,19 +109,6 @@ export class VideoMetadata implements INodeType {
         default: "extractMetadata",
       },
       {
-        displayName: "Binary Property",
-        name: "binaryPropertyName",
-        type: "string",
-        default: "data",
-        required: true,
-        displayOptions: {
-          show: {
-            operation: ["extractMetadata", "getDuration", "getResolution"],
-          },
-        },
-        description: "Name of the binary property containing the video file",
-      },
-      {
         displayName: "Include Raw Output",
         name: "includeRaw",
         type: "boolean",
@@ -89,11 +125,6 @@ export class VideoMetadata implements INodeType {
         name: "outputPropertyName",
         type: "string",
         default: "metadata",
-        displayOptions: {
-          show: {
-            operation: ["extractMetadata", "getDuration", "getResolution"],
-          },
-        },
         description: "Name of the output property to store the metadata",
       },
     ],
@@ -103,17 +134,16 @@ export class VideoMetadata implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
-    // Obter o caminho do ffprobe
     const ffprobePath = ffprobeStatic.path;
 
     for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
       try {
-        const operation = this.getNodeParameter(
-          "operation",
+        const inputMode = this.getNodeParameter(
+          "inputMode",
           itemIndex
         ) as string;
-        const binaryPropertyName = this.getNodeParameter(
-          "binaryPropertyName",
+        const operation = this.getNodeParameter(
+          "operation",
           itemIndex
         ) as string;
         const outputPropertyName = this.getNodeParameter(
@@ -121,26 +151,53 @@ export class VideoMetadata implements INodeType {
           itemIndex
         ) as string;
 
-        // Verificar se o binário existe
-        const binaryData = this.helpers.assertBinaryData(
-          itemIndex,
-          binaryPropertyName
-        );
-        const binaryDataBuffer = await this.helpers.getBinaryDataBuffer(
-          itemIndex,
-          binaryPropertyName
-        );
+        let tempFilePath: string;
+        let shouldCleanup = true;
 
-        // Criar arquivo temporário
-        const tempFileName = `video_${Date.now()}_${Math.random()
-          .toString(36)
-          .substring(7)}${binaryData.fileExtension || ".mp4"}`;
-        const tempFilePath = join(tmpdir(), tempFileName);
+        if (inputMode === "binaryData") {
+          const binaryPropertyName = this.getNodeParameter(
+            "binaryPropertyName",
+            itemIndex
+          ) as string;
+          const binaryData = this.helpers.assertBinaryData(
+            itemIndex,
+            binaryPropertyName
+          );
+          const binaryDataBuffer = await this.helpers.getBinaryDataBuffer(
+            itemIndex,
+            binaryPropertyName
+          );
+
+          const tempFileName = `video_${Date.now()}_${Math.random()
+            .toString(36)
+            .substring(7)}${binaryData.fileExtension || ".mp4"}`;
+          tempFilePath = join(tmpdir(), tempFileName);
+
+          await writeFile(tempFilePath, binaryDataBuffer);
+        } else {
+          const videoUrl = this.getNodeParameter(
+            "videoUrl",
+            itemIndex
+          ) as string;
+
+          if (!videoUrl || !videoUrl.startsWith("http")) {
+            throw new NodeOperationError(
+              this.getNode(),
+              "Invalid URL provided",
+              { itemIndex }
+            );
+          }
+
+          const urlExtension = getFileExtensionFromUrl(videoUrl) || ".mp4";
+          const tempFileName = `video_${Date.now()}_${Math.random()
+            .toString(36)
+            .substring(7)}${urlExtension}`;
+          tempFilePath = join(tmpdir(), tempFileName);
+
+          await downloadFile(videoUrl, tempFilePath);
+        }
 
         try {
-          // Escrever o arquivo temporário
-          await writeFile(tempFilePath, binaryDataBuffer);
-
           let result: any;
 
           switch (operation) {
@@ -169,7 +226,6 @@ export class VideoMetadata implements INodeType {
               );
           }
 
-          // Preparar dados de saída
           const outputItem: INodeExecutionData = {
             json: {
               ...items[itemIndex].json,
@@ -180,11 +236,10 @@ export class VideoMetadata implements INodeType {
 
           returnData.push(outputItem);
         } finally {
-          // Limpar arquivo temporário
-          try {
-            await unlink(tempFilePath);
-          } catch (unlinkError) {
-            // Ignorar erro de limpeza
+          if (shouldCleanup) {
+            try {
+              await unlink(tempFilePath);
+            } catch (unlinkError) {}
           }
         }
       } catch (error) {
@@ -205,9 +260,59 @@ export class VideoMetadata implements INodeType {
   }
 }
 
-/**
- * Extrai metadados completos do vídeo
- */
+function downloadFile(url: string, destPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = createWriteStream(destPath);
+    const client = url.startsWith("https") ? https : http;
+
+    client
+      .get(url, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          const redirectUrl = response.headers.location;
+          if (redirectUrl) {
+            file.close();
+            downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+            return;
+          }
+        }
+
+        if (response.statusCode !== 200) {
+          file.close();
+          reject(
+            new Error(`Failed to download file: HTTP ${response.statusCode}`)
+          );
+          return;
+        }
+
+        response.pipe(file);
+
+        file.on("finish", () => {
+          file.close();
+          resolve();
+        });
+
+        file.on("error", (err) => {
+          file.close();
+          reject(err);
+        });
+      })
+      .on("error", (err) => {
+        file.close();
+        reject(err);
+      });
+  });
+}
+
+function getFileExtensionFromUrl(url: string): string | null {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
+    return match ? `.${match[1]}` : null;
+  } catch {
+    return null;
+  }
+}
+
 async function extractFullMetadata(
   context: IExecuteFunctions,
   ffprobePath: string,
@@ -219,13 +324,11 @@ async function extractFullMetadata(
     itemIndex
   ) as boolean;
 
-  // Comando ffprobe para extrair todos os metadados em JSON
   const command = `"${ffprobePath}" -v quiet -print_format json -show_format -show_streams "${filePath}"`;
 
   const { stdout } = await execPromise(command);
   const rawMetadata = JSON.parse(stdout);
 
-  // Processar e organizar os metadados
   const videoStream = rawMetadata.streams?.find(
     (s: any) => s.codec_type === "video"
   );
@@ -233,7 +336,6 @@ async function extractFullMetadata(
     (s: any) => s.codec_type === "audio"
   );
 
-  // Calcular FPS
   let fps = null;
   if (videoStream?.r_frame_rate) {
     const [num, den] = videoStream.r_frame_rate.split("/");
@@ -242,7 +344,6 @@ async function extractFullMetadata(
       : parseFloat(num);
   }
 
-  // Calcular duração em formato legível
   const durationSeconds = parseFloat(rawMetadata.format?.duration) || 0;
   const hours = Math.floor(durationSeconds / 3600);
   const minutes = Math.floor((durationSeconds % 3600) / 60);
@@ -252,7 +353,6 @@ async function extractFullMetadata(
     .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 
   const metadata: any = {
-    // Informações gerais
     filename: rawMetadata.format?.filename,
     format: rawMetadata.format?.format_name,
     format_long: rawMetadata.format?.format_long_name,
@@ -268,7 +368,6 @@ async function extractFullMetadata(
       (parseInt(rawMetadata.format?.bit_rate) || 0) / 1000
     ).toFixed(0),
 
-    // Informações de vídeo
     video: videoStream
       ? {
           codec: videoStream.codec_name,
@@ -290,7 +389,6 @@ async function extractFullMetadata(
         }
       : null,
 
-    // Informações de áudio
     audio: audioStream
       ? {
           codec: audioStream.codec_name,
@@ -308,7 +406,6 @@ async function extractFullMetadata(
         }
       : null,
 
-    // Contadores
     streams_count: {
       total: rawMetadata.streams?.length || 0,
       video:
@@ -323,7 +420,6 @@ async function extractFullMetadata(
     },
   };
 
-  // Incluir metadados brutos se solicitado
   if (includeRaw) {
     metadata.raw = rawMetadata;
   }
@@ -331,9 +427,6 @@ async function extractFullMetadata(
   return metadata;
 }
 
-/**
- * Obtém apenas a duração do vídeo
- */
 async function getDuration(
   ffprobePath: string,
   filePath: string
@@ -359,9 +452,6 @@ async function getDuration(
   };
 }
 
-/**
- * Obtém a resolução do vídeo
- */
 async function getResolution(
   ffprobePath: string,
   filePath: string
@@ -374,7 +464,6 @@ async function getResolution(
     .split("x")
     .map((v) => parseInt(v));
 
-  // Determinar qualidade
   let quality = "Unknown";
   if (height >= 2160) quality = "4K";
   else if (height >= 1440) quality = "2K";
