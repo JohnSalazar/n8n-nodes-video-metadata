@@ -1,5 +1,8 @@
 # n8n-nodes-video-metadata
 
+[![npm version](https://badge.fury.io/js/n8n-nodes-video-metadata.svg)](https://www.npmjs.com/package/n8n-nodes-video-metadata)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Extract video metadata using FFprobe with embedded static binaries - no external dependencies required!
 
 ## ✨ Features
